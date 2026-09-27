@@ -15,6 +15,7 @@ import logging
 import queue
 import socket
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -27,6 +28,7 @@ import contextlib
 import numpy as np
 
 from violawake_sdk._constants import SAMPLE_RATE
+from violawake_sdk._exceptions import AudioCaptureError
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,12 @@ FRAME_SAMPLES = 320
 FRAME_BYTES = FRAME_SAMPLES * 2  # int16 = 2 bytes per sample
 EXPECTED_CHANNELS = 1
 EXPECTED_SAMPLE_WIDTH_BYTES = 2
+
+# Consecutive failed PortAudio reads tolerated before the microphone is declared
+# dead. Mirrors _MAX_CONSECUTIVE_ERRORS in wake_detector.WakeDetector.stream_mic
+# so both microphone paths fail the same way instead of one going quiet.
+_MAX_CONSECUTIVE_READ_ERRORS = 10
+_READ_RETRY_BACKOFF_S = 0.005
 
 
 def _format_audio_contract(sample_rate: int, channels: int, sample_width_bytes: int) -> str:
@@ -133,25 +141,71 @@ class MicrophoneSource:
             ) from None
 
         self._pa = pyaudio.PyAudio()
-        self._stream = self._pa.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self._sample_rate,
-            input=True,
-            frames_per_buffer=self._frame_samples,
-            input_device_index=self._device_index,
-        )
+        try:
+            self._stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self._sample_rate,
+                input=True,
+                frames_per_buffer=self._frame_samples,
+                input_device_index=self._device_index,
+            )
+        except Exception as exc:  # PortAudio surfaces a bare OSError here
+            # Release the native handle before surfacing: a failed open used to
+            # leak the PyAudio object (and its PortAudio host API) on every
+            # retry of a cold-plug loop.
+            with contextlib.suppress(Exception):
+                self._pa.terminate()
+            self._pa = None
+            raise AudioCaptureError(
+                f"Failed to open microphone: {exc}. Check that a microphone is "
+                "connected and not in use by another application."
+            ) from exc
         logger.info("MicrophoneSource started (device=%s)", self._device_index)
 
     def read_frame(self) -> bytes | None:
-        """Read one frame from the microphone."""
+        """Read one frame from the microphone.
+
+        Returns 640 bytes of little-endian int16 PCM. ``None`` keeps its
+        protocol meaning -- the source is exhausted, which for a microphone is
+        only "not open / already stopped". A *failed* read now raises
+        ``AudioCaptureError`` once ``_MAX_CONSECUTIVE_READ_ERRORS`` consecutive
+        reads have failed.
+
+        Returning ``None`` on error was the old shape, and it was load-bearing
+        in the wrong direction: ``_SourceDetector.run()`` (and any integrator
+        copying ``examples/basic_detection.py``) breaks its loop on ``None``,
+        so one transient PortAudio hiccup stopped wake-word detection with no
+        exception, no non-zero exit and only a log line to show for it.
+        """
         if self._stream is None:
             return None
-        try:
-            return self._stream.read(self._frame_samples, exception_on_overflow=False)  # type: ignore[union-attr]
-        except Exception as e:
-            logger.warning("Microphone read error: %s", e)
-            return None
+        last_error: Exception | None = None
+        for attempt in range(1, _MAX_CONSECUTIVE_READ_ERRORS + 1):
+            try:
+                # exception_on_overflow=True is PortAudio's own default, spelled
+                # out here on purpose: with a 320-sample buffer an overflow means
+                # the consumer is already more than one 20 ms period behind, so
+                # the audio about to be scored is corrupt. Silently dropping those
+                # frames is the same bug class fixed in tools/collect_samples.py.
+                frame = self._stream.read(  # type: ignore[union-attr]
+                    self._frame_samples, exception_on_overflow=True
+                )
+            except Exception as exc:  # PortAudio raises bare OSError/IOError
+                last_error = exc
+                logger.warning(
+                    "Microphone read error (%d/%d): %s",
+                    attempt,
+                    _MAX_CONSECUTIVE_READ_ERRORS,
+                    exc,
+                )
+                time.sleep(_READ_RETRY_BACKOFF_S)
+                continue
+            return frame
+        raise AudioCaptureError(
+            f"Microphone read failed {_MAX_CONSECUTIVE_READ_ERRORS} consecutive "
+            f"times. Last error: {last_error}"
+        ) from last_error
 
     def stop(self) -> None:
         """Close the microphone stream."""
