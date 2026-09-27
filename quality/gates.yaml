@@ -20,6 +20,18 @@ gates:
       - tests/unit/test_audio_source.py::TestFileSource::test_rejects_wrong_wav_sample_rate
       - tests/unit/test_audio_source.py::TestMicrophoneSourceContract
 
+  - gate_id: audio-source-error-contract
+    contract: MicrophoneSource must raise AudioCaptureError on open/read failure and must never disguise a device read error as end-of-audio (None), and mic reads must not swallow PortAudio frame overflow.
+    detector: tests/unit/test_audio_source_error_contract.py
+    own_tests:
+      - tests/unit/test_audio_source_error_contract.py::test_detector_flags_the_pre_fix_shapes
+      - tests/unit/test_audio_source_error_contract.py::test_read_frame_does_not_disguise_errors_as_exhaustion
+      - tests/unit/test_audio_source_error_contract.py::test_no_silent_overflow_in_mic_paths
+      - tests/unit/test_audio_source_error_contract.py::test_transient_read_error_keeps_the_stream_alive
+      - tests/unit/test_audio_source_error_contract.py::test_persistent_read_error_raises_after_bounded_budget
+      - tests/unit/test_audio_source_error_contract.py::test_start_failure_raises_sdk_exception_and_releases_handle
+      - tests/unit/test_audio_source_error_contract.py::test_run_loop_still_treats_none_as_end_of_source
+
   - gate_id: collect-samples-mic-buffer-contract
     contract: violawake-collect must capture in bounded 20 ms chunks; a whole-clip frames_per_buffer stalls for duration*fpb/1024 seconds and returns dropped-frame audio.
     detector: tests/unit/test_collect_samples_mic_buffer_contract.py
@@ -30,6 +42,7 @@ gates:
       - tests/unit/test_collect_samples_mic_buffer_contract.py::test_overflow_aborts_the_clip_instead_of_shortening_it
       - tests/unit/test_collect_samples_mic_buffer_contract.py::test_start_tone_fires_immediately_before_capture
       - tests/unit/test_collect_samples_mic_buffer_contract.py::test_cue_trim_covers_the_measured_player_onset_latency
+
 
   - gate_id: oww-backbone-integrity-fail-closed
     contract: The installed OWW backbone hash must match the pinned registry hash before inference sessions load.

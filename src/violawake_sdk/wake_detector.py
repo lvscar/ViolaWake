@@ -1002,7 +1002,13 @@ class WakeDetector:
         try:
             while True:
                 try:
-                    yield stream.read(FRAME_SAMPLES, exception_on_overflow=False)
+                    # exception_on_overflow=True is PortAudio's default, spelled out
+                    # here: an overflow means the consumer fell behind the 20 ms
+                    # audio contract, so any frame scored from that buffer is already
+                    # corrupt. Route it through the consecutive-error budget below
+                    # instead of losing it silently (same bug class as the
+                    # tools/collect_samples.py capture fix).
+                    yield stream.read(FRAME_SAMPLES, exception_on_overflow=True)
                     consecutive_errors = 0
                 except Exception as e:
                     consecutive_errors += 1
