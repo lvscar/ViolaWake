@@ -168,6 +168,51 @@ with WakeDetector(model="temporal_cnn", threshold=0.80, cooldown_s=2.0) as detec
     result = detector.get_confidence()
 ```
 
+### Using a Model You Trained
+
+`violawake-train` exports ONNX, and `WakeDetector` loads it by path -- the same
+engine, the same 4-gate decision policy, no extra step:
+
+```python
+from violawake_sdk import WakeDetector
+from violawake_sdk.audio_source import MicrophoneSource
+
+detector = WakeDetector(model="models/stop.onnx", threshold=0.80)
+source = MicrophoneSource()          # system default input: 16 kHz mono, 20 ms frames
+source.start()
+try:
+    while True:
+        frame = source.read_frame()  # 640 bytes of int16 PCM; None = stopped/exhausted
+        if frame is None:
+            break
+        if detector.detect(frame):   # read the score afterwards, not by scoring twice
+            print("Wake!", detector.last_scores[-1])
+finally:
+    source.stop()
+    detector.close()
+```
+
+Train it, then run that loop:
+
+```bash
+violawake-collect --word stop --output data/stop/positives --count 150
+violawake-collect --word stop --output data/stop/negatives --count 150   # same mic, no wake word
+violawake-train --word stop --positives data/stop/positives \
+    --negatives data/stop/negatives --output models/stop.onnx
+```
+
+Negatives recorded on the *same microphone as the positives* matter: TTS-generated
+speech negatives have a digital noise floor of zero, so a model trained without
+real room noise learns the recording channel instead of the word, and the
+post-training quality gate fails it on the silence axis.
+
+A runnable version of the loop above -- live score meter, `--list-devices`,
+`--threshold`, and an offline `--wav` mode that needs no microphone:
+
+```bash
+python examples/mic_detection_with_trained_model.py --model models/stop.onnx
+```
+
 ### Threshold Tuning
 
 | Threshold | Behavior | Use Case |
